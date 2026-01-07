@@ -42,11 +42,12 @@ function debugLog(previewId: string, message: string) {
 }
 
 const INSPECT_SELECTED_HIGHLIGHT_CONFIG = {
-  showInfo: false,
-  borderColor: { r: 59, g: 130, b: 246, a: 1 },
-  contentColor: { r: 59, g: 130, b: 246, a: 0.12 },
-  paddingColor: { r: 34, g: 197, b: 94, a: 0.1 },
-  marginColor: { r: 234, g: 179, b: 8, a: 0.14 }
+  // Chrome DevTools-like colors/label.
+  showInfo: true,
+  borderColor: { r: 26, g: 115, b: 232, a: 1 },
+  contentColor: { r: 26, g: 115, b: 232, a: 0.1 },
+  paddingColor: { r: 0, g: 200, b: 83, a: 0.15 },
+  marginColor: { r: 249, g: 171, b: 0, a: 0.2 }
 };
 
 // Use Overlay.setInspectMode for picking (DevTools-like), but keep hover highlight invisible.
@@ -344,8 +345,6 @@ async function enterInspect(entry: PreviewEntry) {
   await sendCommandSafe(entry, "DOM.setInspectMode", { mode: "none" });
   await sendCommandSafe(entry, "Overlay.hideHighlight");
 
-  // Prefer injected inspect: it reliably prevents page interaction while Inspect is on,
-  // and uses a binding + DOM.getNodeForLocation to resolve nodeId deterministically.
   const runtime = await sendCommandSafe(entry, "Runtime.enable");
   debugLog(entry.id, `Runtime.enable ok=${runtime.ok}`);
   const dom = await sendCommandSafe(entry, "DOM.enable");
@@ -367,11 +366,9 @@ async function enterInspect(entry: PreviewEntry) {
   }
 
   // Try DevTools-like pick mode first: Overlay.setInspectMode emits Overlay.inspectNodeRequested with backendNodeId.
-  if (!entry.inspect.capabilities.overlay) {
-    const overlay = await sendCommandSafe(entry, "Overlay.enable");
-    entry.inspect.capabilities.overlay = overlay.ok;
-    debugLog(entry.id, `Overlay.enable ok=${overlay.ok}`);
-  }
+  const overlay = await sendCommandSafe(entry, "Overlay.enable");
+  entry.inspect.capabilities.overlay = overlay.ok;
+  debugLog(entry.id, `Overlay.enable ok=${overlay.ok}`);
 
   if (entry.inspect.capabilities.overlay) {
     const overlayInspect = await sendCommandSafe(entry, "Overlay.setInspectMode", {
@@ -451,8 +448,10 @@ async function exitInspect(entry: PreviewEntry, opts?: { force?: boolean }) {
   // Best-effort cleanup in all modes. Some targets can fail individual CDP calls depending on timing
   // (navigation, crashed renderer, context destroyed). We try multiple ways to ensure we never
   // leave the preview in a state where clicks are still intercepted.
-  await sendCommandSafe(entry, "Overlay.setInspectMode", { mode: "none" });
-  await sendCommandSafe(entry, "DOM.setInspectMode", { mode: "none" });
+  const overlayNone = await sendCommandSafe(entry, "Overlay.setInspectMode", { mode: "none", highlightConfig: INSPECT_PICK_HIGHLIGHT_CONFIG });
+  debugLog(entry.id, `Overlay.setInspectMode(none) ok=${overlayNone.ok}`);
+  const domNone = await sendCommandSafe(entry, "DOM.setInspectMode", { mode: "none", highlightConfig: INSPECT_PICK_HIGHLIGHT_CONFIG });
+  debugLog(entry.id, `DOM.setInspectMode(none) ok=${domNone.ok}`);
   await sendCommandSafe(entry, "Overlay.hideHighlight");
   await sendCommandSafe(entry, "Overlay.disable");
   await sendCommandSafe(entry, "Runtime.evaluate", { expression: interceptClickScript(false), awaitPromise: false, userGesture: true });

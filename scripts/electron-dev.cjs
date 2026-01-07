@@ -23,6 +23,24 @@ function buildChildEnv() {
 const electronBinary = require("electron");
 const args = process.argv.slice(2);
 
+// When running Electron directly, the app "main" entry must exist.
+// `pnpm dev` runs the watchers that generate `dist/main/main.cjs` before launching Electron.
+try {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const projectRoot = path.join(__dirname, "..");
+  const mainEntry = path.join(projectRoot, "dist", "main", "main.cjs");
+  if (!fs.existsSync(mainEntry)) {
+    // eslint-disable-next-line no-console
+    console.error(`[electron:dev] Missing ${mainEntry}`);
+    // eslint-disable-next-line no-console
+    console.error(`[electron:dev] Run "pnpm dev" (recommended) or "pnpm run main:watch" first.`);
+    process.exit(1);
+  }
+} catch {
+  // ignore
+}
+
 const child = spawn(electronBinary, args.length ? args : ["."], {
   stdio: "inherit",
   env: buildChildEnv()

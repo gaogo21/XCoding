@@ -19,6 +19,7 @@ export default defineConfig({
     entries: ["index.html"]
   },
   build: {
+    outDir: "dist/renderer",
     rollupOptions: {
       input: {
         app: "index.html"

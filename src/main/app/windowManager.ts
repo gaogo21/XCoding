@@ -112,9 +112,14 @@ export function createWindow({
   }
 
   const slot = activeSlotByWindowId.get(win.id) ?? 1;
-  void win.loadFile(path.join(__dirname, "../index.html"), { search: `?slot=${slot}&windowMode=multi` });
+  void (async () => {
+    try {
+      await win.loadFile(path.join(__dirname, "../renderer/index.html"), { search: `?slot=${slot}&windowMode=multi` });
+    } catch {
+      await win.loadFile(path.join(__dirname, "../index.html"), { search: `?slot=${slot}&windowMode=multi` });
+    }
+  })();
   if (shouldOpenDevTools) win.webContents.openDevTools({ mode: "detach" });
   if (!mainWindow) mainWindow = win;
   return win;
 }
-

@@ -65,7 +65,13 @@ export function registerWindowIpc({
       // Reload URL with desired slot (works for both dev and packaged).
       const qs = `?slot=${desiredSlot}&windowMode=${desiredMode}`;
       if (!app.isPackaged) await win.loadURL(`${devServerUrl}${qs}`);
-      else await win.loadFile(path.join(__dirname, "../index.html"), { search: qs });
+      else {
+        try {
+          await win.loadFile(path.join(__dirname, "../renderer/index.html"), { search: qs });
+        } catch {
+          await win.loadFile(path.join(__dirname, "../index.html"), { search: qs });
+        }
+      }
     } catch {
       if (desiredMode === "single") {
         singleSlotByWindowId.delete(win.id);
@@ -75,4 +81,3 @@ export function registerWindowIpc({
     return { ok: true, windowId: win.id };
   });
 }
-
