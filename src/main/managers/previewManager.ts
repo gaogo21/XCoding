@@ -41,12 +41,22 @@ function debugLog(previewId: string, message: string) {
   }
 }
 
-const HOVER_HIGHLIGHT_CONFIG = {
-  showInfo: true,
+const INSPECT_SELECTED_HIGHLIGHT_CONFIG = {
+  showInfo: false,
   borderColor: { r: 59, g: 130, b: 246, a: 1 },
-  contentColor: { r: 59, g: 130, b: 246, a: 0.15 },
-  paddingColor: { r: 34, g: 197, b: 94, a: 0.15 },
-  marginColor: { r: 234, g: 179, b: 8, a: 0.2 }
+  contentColor: { r: 59, g: 130, b: 246, a: 0.12 },
+  paddingColor: { r: 34, g: 197, b: 94, a: 0.1 },
+  marginColor: { r: 234, g: 179, b: 8, a: 0.14 }
+};
+
+// Use Overlay.setInspectMode for picking (DevTools-like), but keep hover highlight invisible.
+// The selected node highlight is handled separately via Overlay.highlightNode so it never "sticks" on old nodes.
+const INSPECT_PICK_HIGHLIGHT_CONFIG = {
+  showInfo: false,
+  borderColor: { r: 0, g: 0, b: 0, a: 0 },
+  contentColor: { r: 0, g: 0, b: 0, a: 0 },
+  paddingColor: { r: 0, g: 0, b: 0, a: 0 },
+  marginColor: { r: 0, g: 0, b: 0, a: 0 }
 };
 
 async function sendCommandSafe(entry: PreviewEntry, method: string, params?: Record<string, unknown>) {
@@ -59,19 +69,37 @@ async function sendCommandSafe(entry: PreviewEntry, method: string, params?: Rec
   }
 }
 
+async function highlightSelectedNode(entry: PreviewEntry, nodeId: number) {
+  const enabled = await sendCommandSafe(entry, "Overlay.enable");
+  if (!enabled.ok) return;
+
+  await sendCommandSafe(entry, "Overlay.hideHighlight");
+  const resp = await sendCommandSafe(entry, "Overlay.highlightNode", {
+    nodeId,
+    highlightConfig: INSPECT_SELECTED_HIGHLIGHT_CONFIG
+  });
+  if (!resp.ok) {
+    const msg = String((resp.error as any)?.message ?? "");
+    debugLog(entry.id, `Overlay.highlightNode failed: ${msg || "unknown"}`);
+  }
+}
+
 function injectedInspectScript(enabled: boolean) {
   if (!enabled) {
     return `
 (function(){
   try {
     window.__XCODING_INSPECT_ENABLED = false;
-    if (window.__XCODING_INSPECT_CLEAR) window.__XCODING_INSPECT_CLEAR();
+    // Back-compat cleanup for older injected versions that modified DOM outlines.
+    if (typeof window.__XCODING_INSPECT_CLEAR === "function") window.__XCODING_INSPECT_CLEAR();
+    if (typeof window.__XCODING_INSPECT_UNINSTALL === "function") window.__XCODING_INSPECT_UNINSTALL();
   } catch {}
 })();`;
   }
 
   return `
 (function(){
+  var VERSION = 2;
   function __xcodingSend(msg) {
     try {
       if (typeof window["${INSPECT_BINDING_NAME}"] === "function") {
@@ -84,84 +112,44 @@ function injectedInspectScript(enabled: boolean) {
       console.log("__XCODING_INSPECT__", JSON.stringify(msg));
     } catch {}
   }
+  // If an older injected script is already installed, upgrade in-place.
+  if (window.__XCODING_INSPECT_INSTALLED && window.__XCODING_INSPECT_VERSION !== VERSION) {
+    try {
+      if (typeof window.__XCODING_INSPECT_UNINSTALL === "function") window.__XCODING_INSPECT_UNINSTALL();
+      if (typeof window.__XCODING_INSPECT_CLEAR === "function") window.__XCODING_INSPECT_CLEAR();
+    } catch {}
+    try {
+      window.__XCODING_INSPECT_INSTALLED = false;
+    } catch {}
+  }
+
   if (window.__XCODING_INSPECT_INSTALLED) {
     window.__XCODING_INSPECT_ENABLED = true;
     __xcodingSend({ type: "enabled" });
     return;
   }
+
+  window.__XCODING_INSPECT_VERSION = VERSION;
   window.__XCODING_INSPECT_INSTALLED = true;
   window.__XCODING_INSPECT_ENABLED = true;
-  var hoverEl = null;
-  var hoverOutline = "";
-  var selectedEl = null;
-  var selectedOutline = "";
-  var lastSelectAt = 0;
-  function clearEl(el, prev) {
-    if (!el) return;
-    try {
-      el.style.outline = prev || "";
-      el.style.outlineOffset = "";
-    } catch {}
-  }
-  function setEl(el, color) {
-    if (!el) return;
-    try {
-      el.style.outline = "2px solid " + color;
-      el.style.outlineOffset = "2px";
-    } catch {}
-  }
-  window.__XCODING_INSPECT_CLEAR = function(){
-    clearEl(hoverEl, hoverOutline);
-    clearEl(selectedEl, selectedOutline);
-    hoverEl = null;
-    selectedEl = null;
-    hoverOutline = "";
-    selectedOutline = "";
-  };
-  document.addEventListener("pointermove", function(e){
-    if (!window.__XCODING_INSPECT_ENABLED) return;
-    var el = document.elementFromPoint(e.clientX, e.clientY);
-    if (!el || el === selectedEl) return;
-    if (el === hoverEl) return;
-    clearEl(hoverEl, hoverOutline);
-    hoverEl = el;
-    try { hoverOutline = el.style.outline || ""; } catch { hoverOutline = ""; }
-    setEl(el, "rgba(59,130,246,0.9)");
-  }, true);
-  document.addEventListener("pointerdown", function(e){
+
+  function onPointerDown(e){
     if (!window.__XCODING_INSPECT_ENABLED) return;
     try {
       e.preventDefault();
       e.stopPropagation();
       if (e.stopImmediatePropagation) e.stopImmediatePropagation();
     } catch {}
-    lastSelectAt = Date.now();
-    var el = document.elementFromPoint(e.clientX, e.clientY);
-    if (el) {
-      clearEl(selectedEl, selectedOutline);
-      selectedEl = el;
-      try { selectedOutline = el.style.outline || ""; } catch { selectedOutline = ""; }
-      setEl(el, "rgba(16,185,129,0.95)");
-    }
     __xcodingSend({ type: "pointerdown", x: e.clientX, y: e.clientY });
-  }, true);
-  document.addEventListener("click", function(e){
-    if (!window.__XCODING_INSPECT_ENABLED) return;
-    try {
-      e.preventDefault();
-      e.stopPropagation();
-      if (e.stopImmediatePropagation) e.stopImmediatePropagation();
-    } catch {}
-    if (Date.now() - lastSelectAt < 250) return;
-    var el = document.elementFromPoint(e.clientX, e.clientY);
-    if (el) {
-      clearEl(selectedEl, selectedOutline);
-      selectedEl = el;
-      try { selectedOutline = el.style.outline || ""; } catch { selectedOutline = ""; }
-      setEl(el, "rgba(16,185,129,0.95)");
-    }
-    __xcodingSend({ type: "click", x: e.clientX, y: e.clientY });
-  }, true);
+  }
+
+  // Capture phase ensures we block page interaction reliably.
+  document.addEventListener("pointerdown", onPointerDown, true);
+
+  window.__XCODING_INSPECT_UNINSTALL = function(){
+    try { document.removeEventListener("pointerdown", onPointerDown, true); } catch {}
+    try { window.__XCODING_INSPECT_ENABLED = false; } catch {}
+  };
 
   __xcodingSend({ type: "installed" });
 })();`;
@@ -233,6 +221,7 @@ async function resolveBackendNodeId(entry: PreviewEntry, backendNodeId: number):
 async function handleNodeSelected(entry: PreviewEntry, nodeId: number) {
   entry.inspect.selectedNodeId = nodeId;
   debugLog(entry.id, `handleNodeSelected nodeId=${nodeId}`);
+  await highlightSelectedNode(entry, nodeId);
   const { computed, boxModel } = await fetchNodeData(entry, nodeId);
   debugLog(entry.id, `computedKeys=${Object.keys(computed).length} boxModel=${boxModel ? "yes" : "no"}`);
   broadcast("preview:element:selected", { previewId: entry.id, nodeId, computed, boxModel, timestamp: Date.now() });
@@ -376,6 +365,44 @@ async function enterInspect(entry: PreviewEntry) {
     entry.inspect.capabilities.css = css.ok;
     debugLog(entry.id, `CSS.enable ok=${css.ok}`);
   }
+
+  // Try DevTools-like pick mode first: Overlay.setInspectMode emits Overlay.inspectNodeRequested with backendNodeId.
+  if (!entry.inspect.capabilities.overlay) {
+    const overlay = await sendCommandSafe(entry, "Overlay.enable");
+    entry.inspect.capabilities.overlay = overlay.ok;
+    debugLog(entry.id, `Overlay.enable ok=${overlay.ok}`);
+  }
+
+  if (entry.inspect.capabilities.overlay) {
+    const overlayInspect = await sendCommandSafe(entry, "Overlay.setInspectMode", {
+      mode: "searchForNode",
+      highlightConfig: INSPECT_PICK_HIGHLIGHT_CONFIG
+    });
+    entry.inspect.capabilities.overlayInspect = overlayInspect.ok;
+    debugLog(entry.id, `Overlay.setInspectMode ok=${overlayInspect.ok}`);
+    if (overlayInspect.ok) {
+      entry.inspect.enabled = true;
+      entry.inspect.mode = "overlay";
+      broadcast("preview:inspect:state", { previewId: entry.id, enabled: true });
+      debugLog(entry.id, "inspect enabled mode=overlay");
+      return { ok: true as const };
+    }
+  }
+
+  const domInspect = await sendCommandSafe(entry, "DOM.setInspectMode", {
+    mode: "searchForNode",
+    highlightConfig: INSPECT_PICK_HIGHLIGHT_CONFIG
+  });
+  entry.inspect.capabilities.domInspect = domInspect.ok;
+  debugLog(entry.id, `DOM.setInspectMode ok=${domInspect.ok}`);
+  if (domInspect.ok) {
+    entry.inspect.enabled = true;
+    entry.inspect.mode = "dom";
+    broadcast("preview:inspect:state", { previewId: entry.id, enabled: true });
+    debugLog(entry.id, "inspect enabled mode=dom");
+    return { ok: true as const };
+  }
+
   // Always try to ensure binding exists for the current document/context.
   const binding = await sendCommandSafe(entry, "Runtime.addBinding", { name: INSPECT_BINDING_NAME });
   if (!binding.ok) {
@@ -516,6 +543,7 @@ function attachPreviewDebugger(previewId: string, view: BrowserView) {
       void (async () => {
         const backendNodeId = Number((params as any)?.backendNodeId ?? 0);
         const directNodeId = Number((params as any)?.nodeId ?? 0);
+        debugLog(previewId, `${method} backendNodeId=${backendNodeId} nodeId=${directNodeId}`);
         const nodeId = directNodeId || (backendNodeId ? await resolveBackendNodeId(entry, backendNodeId) : null);
         if (!nodeId) return;
         await handleNodeSelected(entry, nodeId);
