@@ -3,6 +3,7 @@ import { defineConfig } from "vite";
 import monacoPluginImport from "vite-plugin-monaco-editor";
 
 const monacoEditorPlugin = (monacoPluginImport as any).default ?? monacoPluginImport;
+const port = Number.parseInt(process.env.VITE_PORT ?? "5173", 10) || 5173;
 
 export default defineConfig({
   base: "./",
@@ -26,7 +27,7 @@ export default defineConfig({
   },
   server: {
     host: "127.0.0.1",
-    port: 5173,
+    port,
     strictPort: true
   }
 });

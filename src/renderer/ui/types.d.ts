@@ -26,8 +26,15 @@ declare global {
         setBounds: (payload: { previewId: string; bounds: { x: number; y: number; width: number; height: number } }) => Promise<{ ok: boolean; reason?: string }>;
         navigate: (payload: { previewId: string; url: string }) => Promise<{ ok: boolean; reason?: string }>;
         destroy: (payload: { previewId: string }) => Promise<{ ok: boolean; reason?: string }>;
+        inspectSet: (payload: { previewId: string; enabled: boolean }) => Promise<{ ok: boolean; reason?: string }>;
+        styleSet: (payload: { previewId: string; nodeId: number; property: string; value: string }) => Promise<{ ok: boolean; reason?: string }>;
         onConsole: (listener: (payload: { previewId: string; level: string; text: string; timestamp: number }) => void) => () => void;
         onNetwork: (listener: (payload: { previewId: string; requestId: string; url: string; status: number; method: string; timestamp: number }) => void) => () => void;
+        onInspectState: (listener: (payload: { previewId: string; enabled: boolean }) => void) => () => void;
+        onElementSelected: (
+          listener: (payload: { previewId: string; nodeId: number; computed: Record<string, string>; boxModel?: unknown; timestamp: number }) => void
+        ) => () => void;
+        onElementUpdated: (listener: (payload: { previewId: string; nodeId: number; computed: Record<string, string>; timestamp: number }) => void) => () => void;
       };
       projects: {
         get: () => Promise<{

@@ -20,6 +20,8 @@ contextBridge.exposeInMainWorld("xcoding", {
     navigate: (payload) => ipcRenderer.invoke("preview:navigate", payload),
     destroy: (payload) => ipcRenderer.invoke("preview:destroy", payload),
     setBounds: (payload) => ipcRenderer.invoke("preview:setBounds", payload),
+    inspectSet: (payload) => ipcRenderer.invoke("preview:inspect:set", payload),
+    styleSet: (payload) => ipcRenderer.invoke("preview:style:set", payload),
     onConsole: (listener) => {
       const wrapped = (_event, payload) => listener(payload);
       ipcRenderer.on("preview:console", wrapped);
@@ -29,6 +31,21 @@ contextBridge.exposeInMainWorld("xcoding", {
       const wrapped = (_event, payload) => listener(payload);
       ipcRenderer.on("preview:network", wrapped);
       return () => ipcRenderer.off("preview:network", wrapped);
+    },
+    onInspectState: (listener) => {
+      const wrapped = (_event, payload) => listener(payload);
+      ipcRenderer.on("preview:inspect:state", wrapped);
+      return () => ipcRenderer.off("preview:inspect:state", wrapped);
+    },
+    onElementSelected: (listener) => {
+      const wrapped = (_event, payload) => listener(payload);
+      ipcRenderer.on("preview:element:selected", wrapped);
+      return () => ipcRenderer.off("preview:element:selected", wrapped);
+    },
+    onElementUpdated: (listener) => {
+      const wrapped = (_event, payload) => listener(payload);
+      ipcRenderer.on("preview:element:updated", wrapped);
+      return () => ipcRenderer.off("preview:element:updated", wrapped);
     }
   },
   projects: {

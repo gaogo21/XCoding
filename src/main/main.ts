@@ -1,4 +1,5 @@
 import { BrowserWindow, app, globalShortcut, net, protocol } from "electron";
+import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { setupAppMenu } from "./app/menu";
 import { registerShortcuts } from "./app/shortcuts";
@@ -27,7 +28,26 @@ try {
   // ignore
 }
 
-const DEV_SERVER_URL = "http://127.0.0.1:5173";
+// In development, keep a separate userData dir so you can run the dev build while the packaged app is open.
+// This also prevents project/settings collisions between prod and dev runs.
+if (!app.isPackaged) {
+  try {
+    const devUserData = path.join(app.getPath("appData"), "XCoding-dev");
+    app.setPath("userData", devUserData);
+  } catch {
+    // ignore
+  }
+}
+
+function getDevServerUrl(): string {
+  const explicit = process.env.VITE_DEV_SERVER_URL ?? process.env.DEV_SERVER_URL;
+  if (explicit) return explicit;
+
+  const port = Number.parseInt(process.env.VITE_PORT ?? "5173", 10) || 5173;
+  return `http://127.0.0.1:${port}`;
+}
+
+const DEV_SERVER_URL = getDevServerUrl();
 
 // Ensure only one IDE instance runs at a time.
 // This guarantees we only ever spawn a single `codex app-server` for the whole IDE,

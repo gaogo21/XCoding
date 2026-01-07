@@ -6,6 +6,8 @@ import LayoutManager, { type LayoutMode, type PaneId, type SplitIntent } from ".
 import MarkdownPreviewView from "./MarkdownPreviewView";
 import ImagePreviewView from "./ImagePreviewView";
 import PreviewView from "./PreviewView";
+import PreviewInspectToggle from "./PreviewInspectToggle";
+import PreviewDesignPanel from "./PreviewDesignPanel";
 import TerminalPanel, { type TerminalPanelState } from "./TerminalPanel";
 import WelcomeView from "./WelcomeView";
 import type { AnyTab, SlotUiState } from "./appTypes";
@@ -320,6 +322,7 @@ export default function ProjectWorkspaceMain(props: Props) {
                         >
                           Go
                         </button>
+                        <PreviewInspectToggle isActive={isTabActive} previewId={tab.id} />
                         <button
                           className={[
                             "rounded px-2 py-1 text-[11px]",
@@ -356,7 +359,12 @@ export default function ProjectWorkspaceMain(props: Props) {
                         </button>
                       </div>
                       <div className="min-h-0 flex-1 p-2">
-                        <PreviewView isActive={isTabActive} previewId={tab.id} url={tab.url} />
+                        <div className="flex h-full min-h-0 gap-2">
+                          <div className="min-w-0 flex-1">
+                            <PreviewView isActive={isTabActive} previewId={tab.id} url={tab.url} />
+                          </div>
+                          <PreviewDesignPanel isActive={isTabActive} previewId={tab.id} />
+                        </div>
                       </div>
                     </div>
                   );

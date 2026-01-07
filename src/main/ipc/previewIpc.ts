@@ -1,5 +1,14 @@
 import { ipcMain } from "electron";
-import { createPreview, destroyPreview, hidePreview, navigatePreview, setPreviewBounds, showPreview } from "../managers/previewManager";
+import {
+  createPreview,
+  destroyPreview,
+  hidePreview,
+  navigatePreview,
+  setPreviewBounds,
+  setPreviewInspect,
+  setPreviewStyle,
+  showPreview
+} from "../managers/previewManager";
 
 export function registerPreviewIpc() {
   ipcMain.handle("preview:create", (_event, { previewId, url }: { previewId: string; url: string }) => createPreview(previewId, url));
@@ -19,5 +28,15 @@ export function registerPreviewIpc() {
   ipcMain.handle("preview:navigate", (_event, { previewId, url }: { previewId: string; url: string }) => navigatePreview(previewId, url));
 
   ipcMain.handle("preview:destroy", (_event, { previewId }: { previewId: string }) => destroyPreview(previewId));
-}
 
+  ipcMain.handle(
+    "preview:inspect:set",
+    (_event, { previewId, enabled }: { previewId: string; enabled: boolean }) => setPreviewInspect(previewId, enabled)
+  );
+
+  ipcMain.handle(
+    "preview:style:set",
+    (_event, { previewId, nodeId, property, value }: { previewId: string; nodeId: number; property: string; value: string }) =>
+      setPreviewStyle(previewId, { nodeId, property, value })
+  );
+}

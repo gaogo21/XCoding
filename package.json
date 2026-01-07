@@ -10,7 +10,7 @@
     "preinstall": "node scripts/ensure-pnpm.cjs",
     "postinstall": "node scripts/fix-node-pty-perms.cjs",
     "setup:codex": "node scripts/fetch-codex-binary.cjs",
-    "dev": "concurrently -k \"vite\" \"pnpm run main:watch\" \"wait-on http://127.0.0.1:5173 file:dist/main/main.cjs && pnpm run electron:dev\"",
+    "dev": "node scripts/dev.cjs",
     "main:watch": "tsup --config tsup.config.ts --watch --onSuccess \"node scripts/copy-preload.cjs\"",
     "electron:dev": "node scripts/electron-dev.cjs .",
     "build": "vite build && tsup --config tsup.config.ts && node scripts/copy-preload.cjs",
