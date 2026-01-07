@@ -25,6 +25,7 @@ const previews = new Map<string, PreviewEntry>();
 let activePreviewId: string | null = null;
 
 const INSPECT_BINDING_NAME = "__xcodingInspectSend";
+const INSPECT_CURSOR_STYLE_ID = "__xcodingInspectCursorStyle";
 
 function debugLog(previewId: string, message: string) {
   const text = `[preview:${previewId}] ${message}`;
@@ -42,20 +43,43 @@ function debugLog(previewId: string, message: string) {
 }
 
 const INSPECT_SELECTED_HIGHLIGHT_CONFIG = {
-  // Chrome DevTools-like colors/label.
+  // Cursor/Chrome DevTools-like legacy tooltip (blue pill), not the Material card.
   showInfo: true,
+  displayAsMaterial: false,
+  showAccessibilityInfo: false,
   borderColor: { r: 26, g: 115, b: 232, a: 1 },
-  contentColor: { r: 26, g: 115, b: 232, a: 0.1 },
-  paddingColor: { r: 0, g: 200, b: 83, a: 0.15 },
-  marginColor: { r: 249, g: 171, b: 0, a: 0.2 }
+  contentColor: { r: 26, g: 115, b: 232, a: 0.08 },
+  paddingColor: { r: 0, g: 0, b: 0, a: 0 },
+  marginColor: { r: 0, g: 0, b: 0, a: 0 }
 };
 
-// Use Overlay.setInspectMode for picking (DevTools-like), but keep hover highlight invisible.
-// The selected node highlight is handled separately via Overlay.highlightNode so it never "sticks" on old nodes.
+const INSPECT_SELECTED_HIGHLIGHT_CONFIG_NO_A11Y = {
+  showInfo: true,
+  displayAsMaterial: false,
+  borderColor: { r: 26, g: 115, b: 232, a: 1 },
+  contentColor: { r: 26, g: 115, b: 232, a: 0.08 },
+  paddingColor: { r: 0, g: 0, b: 0, a: 0 },
+  marginColor: { r: 0, g: 0, b: 0, a: 0 }
+};
+
+// Use Overlay.setInspectMode for picking (DevTools-like hover highlight). In overlay/dom modes, we rely on InspectMode
+// to draw the highlight (Cursor-like), and only fall back to Overlay.highlightNode in injected mode.
 const INSPECT_PICK_HIGHLIGHT_CONFIG = {
-  showInfo: false,
-  borderColor: { r: 0, g: 0, b: 0, a: 0 },
-  contentColor: { r: 0, g: 0, b: 0, a: 0 },
+  // Cursor-like inspect hover highlight (same look as selection).
+  showInfo: true,
+  displayAsMaterial: false,
+  showAccessibilityInfo: false,
+  borderColor: { r: 26, g: 115, b: 232, a: 1 },
+  contentColor: { r: 26, g: 115, b: 232, a: 0.08 },
+  paddingColor: { r: 0, g: 0, b: 0, a: 0 },
+  marginColor: { r: 0, g: 0, b: 0, a: 0 }
+};
+
+const INSPECT_PICK_HIGHLIGHT_CONFIG_NO_A11Y = {
+  showInfo: true,
+  displayAsMaterial: false,
+  borderColor: { r: 26, g: 115, b: 232, a: 1 },
+  contentColor: { r: 26, g: 115, b: 232, a: 0.08 },
   paddingColor: { r: 0, g: 0, b: 0, a: 0 },
   marginColor: { r: 0, g: 0, b: 0, a: 0 }
 };
@@ -75,14 +99,48 @@ async function highlightSelectedNode(entry: PreviewEntry, nodeId: number) {
   if (!enabled.ok) return;
 
   await sendCommandSafe(entry, "Overlay.hideHighlight");
-  const resp = await sendCommandSafe(entry, "Overlay.highlightNode", {
+  let resp = await sendCommandSafe(entry, "Overlay.highlightNode", {
     nodeId,
     highlightConfig: INSPECT_SELECTED_HIGHLIGHT_CONFIG
   });
   if (!resp.ok) {
+    // Some Chromium/Electron versions don't support `showAccessibilityInfo`.
+    resp = await sendCommandSafe(entry, "Overlay.highlightNode", {
+      nodeId,
+      highlightConfig: INSPECT_SELECTED_HIGHLIGHT_CONFIG_NO_A11Y
+    });
+  }
+  if (!resp.ok) {
     const msg = String((resp.error as any)?.message ?? "");
     debugLog(entry.id, `Overlay.highlightNode failed: ${msg || "unknown"}`);
   }
+}
+
+function injectedInspectCursorScript(enabled: boolean) {
+  if (!enabled) {
+    return `
+(function(){
+  try {
+    var style = document.getElementById(${JSON.stringify(INSPECT_CURSOR_STYLE_ID)});
+    if (style && style.parentNode) style.parentNode.removeChild(style);
+  } catch {}
+})();`;
+  }
+
+  return `
+(function(){
+  try {
+    var id = ${JSON.stringify(INSPECT_CURSOR_STYLE_ID)};
+    var style = document.getElementById(id);
+    if (!style) {
+      style = document.createElement("style");
+      style.id = id;
+      style.textContent =
+        "html, body, html * { cursor: crosshair !important; }\\n";
+      (document.head || document.documentElement).appendChild(style);
+    }
+  } catch {}
+})();`;
 }
 
 function injectedInspectScript(enabled: boolean) {
@@ -222,7 +280,11 @@ async function resolveBackendNodeId(entry: PreviewEntry, backendNodeId: number):
 async function handleNodeSelected(entry: PreviewEntry, nodeId: number) {
   entry.inspect.selectedNodeId = nodeId;
   debugLog(entry.id, `handleNodeSelected nodeId=${nodeId}`);
-  await highlightSelectedNode(entry, nodeId);
+  // In Overlay/DOM inspect modes, the highlight is drawn by InspectMode itself (Cursor-like hover highlight).
+  // Only fall back to manual highlight for injected/coordinate-based picking modes.
+  if (entry.inspect.mode !== "overlay" && entry.inspect.mode !== "dom") {
+    await highlightSelectedNode(entry, nodeId);
+  }
   const { computed, boxModel } = await fetchNodeData(entry, nodeId);
   debugLog(entry.id, `computedKeys=${Object.keys(computed).length} boxModel=${boxModel ? "yes" : "no"}`);
   broadcast("preview:element:selected", { previewId: entry.id, nodeId, computed, boxModel, timestamp: Date.now() });
@@ -365,16 +427,25 @@ async function enterInspect(entry: PreviewEntry) {
     debugLog(entry.id, `CSS.enable ok=${css.ok}`);
   }
 
+  // Cursor behavior: crosshair cursor while Inspect is on.
+  await sendCommandSafe(entry, "Runtime.evaluate", { expression: injectedInspectCursorScript(true), awaitPromise: false, userGesture: true });
+
   // Try DevTools-like pick mode first: Overlay.setInspectMode emits Overlay.inspectNodeRequested with backendNodeId.
   const overlay = await sendCommandSafe(entry, "Overlay.enable");
   entry.inspect.capabilities.overlay = overlay.ok;
   debugLog(entry.id, `Overlay.enable ok=${overlay.ok}`);
 
   if (entry.inspect.capabilities.overlay) {
-    const overlayInspect = await sendCommandSafe(entry, "Overlay.setInspectMode", {
+    let overlayInspect = await sendCommandSafe(entry, "Overlay.setInspectMode", {
       mode: "searchForNode",
       highlightConfig: INSPECT_PICK_HIGHLIGHT_CONFIG
     });
+    if (!overlayInspect.ok) {
+      overlayInspect = await sendCommandSafe(entry, "Overlay.setInspectMode", {
+        mode: "searchForNode",
+        highlightConfig: INSPECT_PICK_HIGHLIGHT_CONFIG_NO_A11Y
+      });
+    }
     entry.inspect.capabilities.overlayInspect = overlayInspect.ok;
     debugLog(entry.id, `Overlay.setInspectMode ok=${overlayInspect.ok}`);
     if (overlayInspect.ok) {
@@ -386,10 +457,16 @@ async function enterInspect(entry: PreviewEntry) {
     }
   }
 
-  const domInspect = await sendCommandSafe(entry, "DOM.setInspectMode", {
+  let domInspect = await sendCommandSafe(entry, "DOM.setInspectMode", {
     mode: "searchForNode",
     highlightConfig: INSPECT_PICK_HIGHLIGHT_CONFIG
   });
+  if (!domInspect.ok) {
+    domInspect = await sendCommandSafe(entry, "DOM.setInspectMode", {
+      mode: "searchForNode",
+      highlightConfig: INSPECT_PICK_HIGHLIGHT_CONFIG_NO_A11Y
+    });
+  }
   entry.inspect.capabilities.domInspect = domInspect.ok;
   debugLog(entry.id, `DOM.setInspectMode ok=${domInspect.ok}`);
   if (domInspect.ok) {
@@ -448,14 +525,26 @@ async function exitInspect(entry: PreviewEntry, opts?: { force?: boolean }) {
   // Best-effort cleanup in all modes. Some targets can fail individual CDP calls depending on timing
   // (navigation, crashed renderer, context destroyed). We try multiple ways to ensure we never
   // leave the preview in a state where clicks are still intercepted.
-  const overlayNone = await sendCommandSafe(entry, "Overlay.setInspectMode", { mode: "none", highlightConfig: INSPECT_PICK_HIGHLIGHT_CONFIG });
+  let overlayNone = await sendCommandSafe(entry, "Overlay.setInspectMode", { mode: "none", highlightConfig: INSPECT_PICK_HIGHLIGHT_CONFIG });
+  if (!overlayNone.ok) {
+    overlayNone = await sendCommandSafe(entry, "Overlay.setInspectMode", { mode: "none", highlightConfig: INSPECT_PICK_HIGHLIGHT_CONFIG_NO_A11Y });
+  }
   debugLog(entry.id, `Overlay.setInspectMode(none) ok=${overlayNone.ok}`);
-  const domNone = await sendCommandSafe(entry, "DOM.setInspectMode", { mode: "none", highlightConfig: INSPECT_PICK_HIGHLIGHT_CONFIG });
+
+  let domNone = await sendCommandSafe(entry, "DOM.setInspectMode", { mode: "none", highlightConfig: INSPECT_PICK_HIGHLIGHT_CONFIG });
+  if (!domNone.ok) {
+    domNone = await sendCommandSafe(entry, "DOM.setInspectMode", { mode: "none", highlightConfig: INSPECT_PICK_HIGHLIGHT_CONFIG_NO_A11Y });
+  }
   debugLog(entry.id, `DOM.setInspectMode(none) ok=${domNone.ok}`);
   await sendCommandSafe(entry, "Overlay.hideHighlight");
   await sendCommandSafe(entry, "Overlay.disable");
   await sendCommandSafe(entry, "Runtime.evaluate", { expression: interceptClickScript(false), awaitPromise: false, userGesture: true });
   await sendCommandSafe(entry, "Runtime.evaluate", { expression: injectedInspectScript(false), awaitPromise: false, userGesture: true });
+  await sendCommandSafe(entry, "Runtime.evaluate", {
+    expression: injectedInspectCursorScript(false),
+    awaitPromise: false,
+    userGesture: true
+  });
 
   entry.inspect.mode = "none";
   broadcast("preview:inspect:state", { previewId: entry.id, enabled: false });
