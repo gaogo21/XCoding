@@ -129,6 +129,7 @@ export default function TerminalView({
   const searchAddonRef = useRef<SearchAddon | null>(null);
   const rendererAddonRef = useRef<{ dispose: () => void } | null>(null);
   const linkProviderDisposableRef = useRef<{ dispose: () => void } | null>(null);
+  const selectionDisposableRef = useRef<{ dispose: () => void } | null>(null);
 
   const sessionIdRef = useRef<string | null>(null);
   const onSessionIdRef = useRef(onSessionId);
@@ -415,9 +416,36 @@ export default function TerminalView({
       fitAddonRef.current = fitAddon;
       searchAddonRef.current = searchAddon;
 
+      const emitSelection = () => {
+        if (!Number.isFinite(Number(slot))) return;
+        const selection = term.getSelection() ?? "";
+        window.dispatchEvent(
+          new CustomEvent("xcoding:terminalSelectionChanged", {
+            detail: { slot, activeSelectionContent: selection, selectionPosition: null }
+          })
+        );
+      };
+      try {
+        selectionDisposableRef.current?.dispose();
+      } catch {
+        // ignore
+      }
+      selectionDisposableRef.current = null;
+      selectionDisposableRef.current = term.onSelectionChange(() => emitSelection());
+      emitSelection();
+
       term.attachCustomKeyEventHandler((event) => {
         const isMod = event.ctrlKey || event.metaKey;
         if (event.type !== "keydown") return true;
+
+        // ⌘/Ctrl+L: inject current selection into AI input
+        if (isMod && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "l") {
+          event.preventDefault();
+          if (Number.isFinite(Number(slot))) {
+            window.dispatchEvent(new CustomEvent("xcoding:triggerCmdL", { detail: { slot } }));
+          }
+          return false; // also "occupy" Ctrl+L even when no selection
+        }
 
         if (isMod && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "f") {
           event.preventDefault();
@@ -545,6 +573,12 @@ export default function TerminalView({
         // ignore
       }
       linkProviderDisposableRef.current = null;
+      try {
+        selectionDisposableRef.current?.dispose();
+      } catch {
+        // ignore
+      }
+      selectionDisposableRef.current = null;
       // Renderer addons are owned by xterm's AddonManager; disposing them here can double-dispose
       // (e.g. WebglAddon) and crash on teardown. Let `terminal.dispose()` handle addon cleanup.
       rendererAddonRef.current = null;
@@ -556,6 +590,10 @@ export default function TerminalView({
       terminalRef.current = null;
       fitAddonRef.current = null;
       searchAddonRef.current = null;
+      // Ensure the selection hint hides if this terminal unmounts.
+      if (Number.isFinite(Number(slot))) {
+        window.dispatchEvent(new CustomEvent("xcoding:terminalSelectionChanged", { detail: { slot, activeSelectionContent: "" } }));
+      }
       writeBufferRef.current = "";
       pendingResizeRef.current = null;
       if (containerRef.current) containerRef.current.innerHTML = "";

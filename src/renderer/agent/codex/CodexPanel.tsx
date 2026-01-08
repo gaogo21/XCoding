@@ -143,6 +143,21 @@ export default function CodexPanel({ slot, projectRootPath, onOpenUrl, onOpenIma
     return () => window.removeEventListener("xcoding:codex:inject", onInject as any);
   }, [slot]);
 
+  // Append text blocks into the Codex composer textarea (⌘L / selection hint).
+  useEffect(() => {
+    const onAppend = (e: Event) => {
+      const detail = (e as CustomEvent)?.detail as any;
+      if (!detail || typeof detail !== "object") return;
+      if (Number(detail.slot) !== slot) return;
+      const text = String(detail.text ?? "");
+      if (!text.trim()) return;
+      setInput((prev) => (prev.trim() ? `${prev}\n\n${text}` : text));
+    };
+
+    window.addEventListener("xcoding:codex:appendInput", onAppend as any);
+    return () => window.removeEventListener("xcoding:codex:appendInput", onAppend as any);
+  }, [slot]);
+
   const bump = useCallback(() => {
     if (scheduledRafRef.current != null) return;
     scheduledRafRef.current = window.requestAnimationFrame(() => {

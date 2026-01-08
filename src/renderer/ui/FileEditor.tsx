@@ -314,6 +314,27 @@ export default function FileEditor({ slot, path, reveal, onDirtyChange, rightExt
                 end: toPos(s.endLineNumber, s.endColumn)
               }));
 
+              // Calculate selection position for hint placement
+              let selectionPosition: { x: number; y: number } | null = null;
+              if (selection && activeSelectionContent.trim()) {
+                try {
+                  const endPos = { lineNumber: selection.endLineNumber, column: selection.endColumn };
+                  const coords = editor.getScrolledVisiblePosition(endPos);
+                  if (coords) {
+                    const domNode = editor.getDomNode();
+                    if (domNode) {
+                      const rect = domNode.getBoundingClientRect();
+                      selectionPosition = {
+                        x: Math.min(rect.left + coords.left, window.innerWidth - 150),
+                        y: Math.min(rect.top + coords.top + coords.height, window.innerHeight - 60)
+                      };
+                    }
+                  }
+                } catch {
+                  // ignore coordinate calculation errors
+                }
+              }
+
               window.dispatchEvent(
                 new CustomEvent("xcoding:fileSelectionChanged", {
                   detail: {
@@ -321,7 +342,8 @@ export default function FileEditor({ slot, path, reveal, onDirtyChange, rightExt
                     path,
                     selection: primary,
                     selections: allSelections,
-                    activeSelectionContent
+                    activeSelectionContent,
+                    selectionPosition
                   }
                 })
               );

@@ -11,6 +11,7 @@ import ProjectSidebar from "./ProjectSidebar";
 import ProjectWorkspaceMain from "./ProjectWorkspaceMain";
 import type { TerminalPanelState } from "./TerminalPanel";
 import TitleBar from "./TitleBar";
+import SelectionHint from "./SelectionHint";
 import {
   getSlotProjectId,
   makeEmptySlotUiState,
@@ -122,6 +123,67 @@ export default function App() {
   const [isDraggingTab, setIsDraggingTab] = useState(false);
   const [isChatInputFocused, setIsChatInputFocused] = useState(false);
 
+  // ⌘L selection injection state
+  const lastSelectionBySlotRef = useRef<Record<number, { path: string; content: string; startLine: number; endLine: number } | null>>({});
+  const lastTerminalSelectionBySlotRef = useRef<Record<number, string | null>>({});
+  const lastSelectionSourceBySlotRef = useRef<Record<number, "monaco" | "terminal" | null>>({});
+  const lastInjectedHashBySlotRef = useRef<Record<number, string>>({});
+  const [cmdLToast, setCmdLToast] = useState<string>("");
+  const cmdLToastTimerRef = useRef<number | null>(null);
+
+  function showCmdLToast(message: string) {
+    if (cmdLToastTimerRef.current) window.clearTimeout(cmdLToastTimerRef.current);
+    setCmdLToast(message);
+    cmdLToastTimerRef.current = window.setTimeout(() => setCmdLToast(""), 1100);
+  }
+
+  useEffect(() => {
+    return () => {
+      if (cmdLToastTimerRef.current) window.clearTimeout(cmdLToastTimerRef.current);
+      cmdLToastTimerRef.current = null;
+    };
+  }, []);
+
+  // Append text to AI input (for ⌘L injection)
+  function appendToAiInput(slot: number, textBlock: string) {
+    const hash = textBlock.trim();
+    if (!hash) return;
+    if (hash === (lastInjectedHashBySlotRef.current[slot] ?? "")) {
+      showCmdLToast("已注入过");
+      return;
+    }
+    lastInjectedHashBySlotRef.current[slot] = hash;
+
+    // Primary target: Codex composer input (append to textarea text)
+    window.dispatchEvent(new CustomEvent("xcoding:codex:appendInput", { detail: { slot, text: textBlock } }));
+
+    // Fallback: legacy built-in Chat input (if ever re-enabled)
+    updateSlot(slot, (s) => {
+      const current = s.chatInput ?? "";
+      const next = current.trim() ? `${current}\n\n${textBlock}` : textBlock;
+      return { ...s, chatInput: next };
+    });
+  }
+
+  // Handle ⌘L trigger from selection
+  function handleCmdL(targetSlot: number = activeProjectSlot) {
+    const source = lastSelectionSourceBySlotRef.current[targetSlot];
+    if (source === "terminal") {
+      const raw = lastTerminalSelectionBySlotRef.current[targetSlot] ?? "";
+      if (!raw.trim()) return;
+      appendToAiInput(targetSlot, raw);
+      return;
+    }
+
+    const sel = lastSelectionBySlotRef.current[targetSlot];
+    if (!sel || !sel.content.trim()) return;
+
+    // Format: @path#Lstart-Lend (or @path#Lline for single line)
+    const lineRef = sel.startLine === sel.endLine ? `#L${sel.startLine}` : `#L${sel.startLine}-L${sel.endLine}`;
+    const reference = `@${sel.path}${lineRef}`;
+    appendToAiInput(targetSlot, reference);
+  }
+
   // In Electron, focusing a `BrowserView` (Preview) can prevent input blur events from firing in this UI webContents.
   // Best-effort: if this webContents loses focus, treat chat input as not focused so Design auto-inject can work.
   useEffect(() => {
@@ -129,6 +191,71 @@ export default function App() {
     window.addEventListener("blur", onBlur);
     return () => window.removeEventListener("blur", onBlur);
   }, []);
+
+  // Track file selection changes for ⌘L injection
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent)?.detail as any;
+      if (!detail || typeof detail !== "object") return;
+      const slot = Number(detail.slot);
+      if (!Number.isFinite(slot)) return;
+
+      const path = typeof detail.path === "string" ? detail.path : "";
+      const content = typeof detail.activeSelectionContent === "string" ? detail.activeSelectionContent : "";
+      const selection = detail.selection;
+
+      if (!content.trim()) {
+        lastSelectionBySlotRef.current[slot] = null;
+        if (lastSelectionSourceBySlotRef.current[slot] === "monaco") lastSelectionSourceBySlotRef.current[slot] = null;
+        return;
+      }
+
+      const startLine0 = selection?.start?.line != null ? Number(selection.start.line) : 0;
+      const endLine0Raw = selection?.end?.line != null ? Number(selection.end.line) : startLine0;
+      const endChar = selection?.end?.character != null ? Number(selection.end.character) : 0;
+      const endLine0 = endChar === 0 && endLine0Raw > startLine0 ? endLine0Raw - 1 : endLine0Raw;
+      const startLine = startLine0 + 1;
+      const endLine = endLine0 + 1;
+
+      lastSelectionBySlotRef.current[slot] = { path, content, startLine, endLine };
+      lastSelectionSourceBySlotRef.current[slot] = "monaco";
+    };
+
+    window.addEventListener("xcoding:fileSelectionChanged", handler as any);
+    return () => window.removeEventListener("xcoding:fileSelectionChanged", handler as any);
+  }, []);
+
+  // Track terminal selection changes for ⌘L injection
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent)?.detail as any;
+      if (!detail || typeof detail !== "object") return;
+      const slot = Number(detail.slot);
+      if (!Number.isFinite(slot)) return;
+      const content = typeof detail.activeSelectionContent === "string" ? detail.activeSelectionContent : "";
+      if (!content.trim()) {
+        lastTerminalSelectionBySlotRef.current[slot] = null;
+        if (lastSelectionSourceBySlotRef.current[slot] === "terminal") lastSelectionSourceBySlotRef.current[slot] = null;
+        return;
+      }
+      lastTerminalSelectionBySlotRef.current[slot] = content;
+      lastSelectionSourceBySlotRef.current[slot] = "terminal";
+    };
+    window.addEventListener("xcoding:terminalSelectionChanged", handler as any);
+    return () => window.removeEventListener("xcoding:terminalSelectionChanged", handler as any);
+  }, []);
+
+  // Terminal can intercept key events before window sees them. Provide an explicit bridge event.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent)?.detail as any;
+      const slot = Number(detail?.slot ?? NaN);
+      if (!Number.isFinite(slot)) return;
+      handleCmdL(slot);
+    };
+    window.addEventListener("xcoding:triggerCmdL", handler as any);
+    return () => window.removeEventListener("xcoding:triggerCmdL", handler as any);
+  }, [activeProjectSlot]);
 
   const slotUiRef = useRef(slotUi);
   const prevSlotProjectIdRef = useRef<Record<number, string | undefined>>({});
@@ -229,6 +356,13 @@ export default function App() {
       if (!e.shiftKey && key === "`") {
         e.preventDefault();
         toggleOrCreateTerminalPanel();
+      }
+
+      // ⌘L: Inject selection reference to AI input
+      if (!e.shiftKey && key === "l") {
+        e.preventDefault();
+        handleCmdL();
+        return;
       }
     };
     window.addEventListener("keydown", handler);
@@ -1787,6 +1921,17 @@ export default function App() {
 	            />
 	          }
 	        />
+
+      {/* Selection hint for ⌘L */}
+      <SelectionHint slot={activeProjectSlot} onTrigger={handleCmdL} />
+
+      {cmdLToast ? (
+        <div className="pointer-events-none fixed bottom-6 left-1/2 z-[9999] -translate-x-1/2">
+          <div className="rounded-md border border-[var(--vscode-panel-border)] bg-[var(--vscode-editor-background)] px-3 py-2 text-[12px] text-[var(--vscode-foreground)] shadow-lg">
+            {cmdLToast}
+          </div>
+        </div>
+      ) : null}
       </div>
     </I18nContext.Provider>
   );
