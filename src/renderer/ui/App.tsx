@@ -120,6 +120,15 @@ export default function App() {
   const [isProjectPickerOpen, setIsProjectPickerOpen] = useState(false);
   const [dragPreviewSlotOrder, setDragPreviewSlotOrder] = useState<number[] | null>(null);
   const [isDraggingTab, setIsDraggingTab] = useState(false);
+  const [isChatInputFocused, setIsChatInputFocused] = useState(false);
+
+  // In Electron, focusing a `BrowserView` (Preview) can prevent input blur events from firing in this UI webContents.
+  // Best-effort: if this webContents loses focus, treat chat input as not focused so Design auto-inject can work.
+  useEffect(() => {
+    const onBlur = () => setIsChatInputFocused(false);
+    window.addEventListener("blur", onBlur);
+    return () => window.removeEventListener("blur", onBlur);
+  }, []);
 
   const slotUiRef = useRef(slotUi);
   const prevSlotProjectIdRef = useRef<Record<number, string | undefined>>({});
@@ -1526,6 +1535,8 @@ export default function App() {
                         activeRequestId={activeUi.activeChatRequestId}
                         onSend={() => void sendChat()}
                         onStop={() => void stopChat()}
+                        onChatInputFocus={() => setIsChatInputFocused(true)}
+                        onChatInputBlur={() => setIsChatInputFocused(false)}
                         stagedFiles={activeUi.stagedFiles}
                         onOpenDiff={(path) => openDiff(path)}
                         onApplyAll={() => void applyAll()}
@@ -1631,9 +1642,15 @@ export default function App() {
             toggleOrCreateTerminalPanel={toggleOrCreateTerminalPanel}
             showPanelTab={showPanelTab}
             openUrlFromTerminal={openUrlFromTerminal}
-            terminalScrollback={terminalScrollback}
-            openPreviewIds={openPreviewIds}
+	            terminalScrollback={terminalScrollback}
+	            openPreviewIds={openPreviewIds}
 	            activePreviewTab={activePreviewTab}
+	            onInjectAI={(text) => {
+	              // Route "Design inspect" context into the active agent UI.
+	              // Note: in this build we hide the legacy Chat view and primarily use the Codex panel.
+	              window.dispatchEvent(new CustomEvent("xcoding:codex:inject", { detail: { slot: activeProjectSlot, text } }));
+	            }}
+	            isAiInputFocused={isChatInputFocused}
 	          />
 
 	          {effectiveLayout.isChatVisible ? (
@@ -1688,6 +1705,8 @@ export default function App() {
 	                    activeRequestId={ui.activeChatRequestId}
 	                    onSend={() => void sendChat()}
 	                    onStop={() => void stopChat()}
+	                    onChatInputFocus={() => setIsChatInputFocused(true)}
+	                    onChatInputBlur={() => setIsChatInputFocused(false)}
 	                    stagedFiles={ui.stagedFiles}
 	                    onOpenDiff={(path) => openDiff(path)}
 	                    onApplyAll={() => void applyAll()}
@@ -1759,6 +1778,8 @@ export default function App() {
 	              activeRequestId={activeUi.activeChatRequestId}
 	              onSend={() => void sendChat()}
 	              onStop={() => void stopChat()}
+	              onChatInputFocus={() => setIsChatInputFocused(true)}
+	              onChatInputBlur={() => setIsChatInputFocused(false)}
 	              stagedFiles={activeUi.stagedFiles}
 	              onOpenDiff={(path) => openDiff(path)}
 	              onApplyAll={() => void applyAll()}

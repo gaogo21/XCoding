@@ -35,6 +35,39 @@ declare global {
           listener: (payload: { previewId: string; nodeId: number; computed: Record<string, string>; boxModel?: unknown; timestamp: number }) => void
         ) => () => void;
         onElementUpdated: (listener: (payload: { previewId: string; nodeId: number; computed: Record<string, string>; timestamp: number }) => void) => () => void;
+        onElementContext: (
+          listener: (payload: {
+            previewId: string;
+            nodeId: number;
+            xcodingElementId: string;
+            elementOpeningTag: string;
+            cssSelector: string;
+            domPath: string;
+            stableSelector: string;
+            attributes: Array<{ name: string; value: string }>;
+            timestamp: number;
+          }) => void
+        ) => () => void;
+        onElementCss: (
+          listener: (payload: {
+            previewId: string;
+            nodeId: number;
+            inlineStyle: Array<{ name: string; value: string }>;
+            matchedRules: Array<{
+              selector: string;
+              sourceUrl?: string;
+              styleSheetId?: string;
+              declarations: Array<{ name: string; value: string }>;
+            }>;
+            inheritedRules: Array<{
+              selector: string;
+              sourceUrl?: string;
+              declarations: Array<{ name: string; value: string }>;
+            }>;
+            cssVariables: Array<{ name: string; value: string }>;
+            timestamp: number;
+          }) => void
+        ) => () => void;
       };
       projects: {
         get: () => Promise<{

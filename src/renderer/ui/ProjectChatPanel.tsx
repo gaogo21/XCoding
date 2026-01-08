@@ -36,6 +36,9 @@ type Props = {
   onOpenDiff: (path: string) => void;
   onApplyAll: () => void;
   onRevertLast: () => void;
+
+  onChatInputFocus?: () => void;
+  onChatInputBlur?: () => void;
 };
 
 export default function ProjectChatPanel(props: Props) {
@@ -65,6 +68,8 @@ export default function ProjectChatPanel(props: Props) {
       activeRequestId={props.activeRequestId}
       onSend={props.onSend}
       onStop={props.onStop}
+      onChatInputFocus={props.onChatInputFocus}
+      onChatInputBlur={props.onChatInputBlur}
       stagedFiles={props.stagedFiles}
       onOpenDiff={props.onOpenDiff}
       onApplyAll={props.onApplyAll}

@@ -46,6 +46,16 @@ contextBridge.exposeInMainWorld("xcoding", {
       const wrapped = (_event, payload) => listener(payload);
       ipcRenderer.on("preview:element:updated", wrapped);
       return () => ipcRenderer.off("preview:element:updated", wrapped);
+    },
+    onElementContext: (listener) => {
+      const wrapped = (_event, payload) => listener(payload);
+      ipcRenderer.on("preview:element:context", wrapped);
+      return () => ipcRenderer.off("preview:element:context", wrapped);
+    },
+    onElementCss: (listener) => {
+      const wrapped = (_event, payload) => listener(payload);
+      ipcRenderer.on("preview:element:css", wrapped);
+      return () => ipcRenderer.off("preview:element:css", wrapped);
     }
   },
   projects: {

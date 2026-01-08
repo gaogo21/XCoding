@@ -42,6 +42,9 @@ type Props = {
   onSend: () => void;
   onStop: () => void;
 
+  onChatInputFocus?: () => void;
+  onChatInputBlur?: () => void;
+
   stagedFiles: string[];
   onOpenDiff: (path: string) => void;
   onApplyAll: () => void;
@@ -73,6 +76,8 @@ export default function ChatPanel({
   activeRequestId,
   onSend,
   onStop,
+  onChatInputFocus,
+  onChatInputBlur,
   stagedFiles,
   onOpenDiff,
   onApplyAll,
@@ -348,6 +353,8 @@ export default function ChatPanel({
             onKeyDown={(e) => {
               if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) onSend();
             }}
+            onFocus={onChatInputFocus}
+            onBlur={onChatInputBlur}
           />
           <button
             className="rounded bg-[var(--vscode-button-background)] px-3 py-1 text-sm text-[var(--vscode-button-foreground)] hover:bg-[var(--vscode-button-hoverBackground)] disabled:opacity-50"

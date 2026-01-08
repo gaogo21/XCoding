@@ -42,6 +42,10 @@ type Props = {
   terminalScrollback: number;
   openPreviewIds: string[];
   activePreviewTab: { id: string; url: string } | null;
+
+  // AI injection props for Design Panel (Phase 1 & 2)
+  onInjectAI?: (text: string) => void;
+  isAiInputFocused?: boolean;
 };
 
 export default function ProjectWorkspaceMain(props: Props) {
@@ -66,7 +70,9 @@ export default function ProjectWorkspaceMain(props: Props) {
     openUrlFromTerminal,
     terminalScrollback,
     openPreviewIds,
-    activePreviewTab
+    activePreviewTab,
+    onInjectAI,
+    isAiInputFocused
   } = props;
 
   return (
@@ -363,7 +369,7 @@ export default function ProjectWorkspaceMain(props: Props) {
                           <div className="min-w-0 flex-1">
                             <PreviewView isActive={isTabActive} previewId={tab.id} url={tab.url} />
                           </div>
-                          <PreviewDesignPanel isActive={isTabActive} previewId={tab.id} />
+                          <PreviewDesignPanel isActive={isTabActive} previewId={tab.id} onInjectAI={onInjectAI} isAiInputFocused={isAiInputFocused} />
                         </div>
                       </div>
                     </div>

@@ -1,6 +1,89 @@
 import { BrowserView } from "electron";
 import { broadcast, mainWindow } from "../app/windowManager";
 
+// ========== ElementContext Types & Constants (Phase 1) ==========
+export type ElementContext = {
+  previewId: string;
+  nodeId: number;
+  xcodingElementId: string;
+  elementOpeningTag: string;
+  cssSelector: string;
+  domPath: string;
+  stableSelector: string;
+  attributes: Array<{ name: string; value: string }>;
+  timestamp: number;
+};
+
+export type CssRulesContext = {
+  previewId: string;
+  nodeId: number;
+  inlineStyle: Array<{ name: string; value: string }>;
+  matchedRules: Array<{
+    selector: string;
+    sourceUrl?: string;
+    styleSheetId?: string;
+    declarations: Array<{ name: string; value: string }>;
+  }>;
+  inheritedRules: Array<{
+    selector: string;
+    sourceUrl?: string;
+    declarations: Array<{ name: string; value: string }>;
+  }>;
+  cssVariables: Array<{ name: string; value: string }>;
+  timestamp: number;
+};
+
+// Limits from requirements
+const LIMITS = {
+  elementOpeningTagMaxBytes: 2048,
+  pathTextMaxBytes: 1024,
+  attributesMaxItems: 50,
+  cssMaxTotalChars: 12288,
+  cssMaxRules: 30,
+  cssMaxDeclarationsPerRule: 20,
+  truncateSuffix: "…(truncated)"
+};
+
+// CSS property whitelist for Phase 2
+const CSS_PROPERTY_WHITELIST = new Set([
+  "display", "position", "top", "right", "bottom", "left", "z-index",
+  "flex", "flex-direction", "flex-wrap", "justify-content", "align-items", "align-content", "gap",
+  "grid", "grid-template-columns", "grid-template-rows", "grid-column", "grid-row",
+  "width", "height", "min-width", "min-height", "max-width", "max-height",
+  "margin", "margin-top", "margin-right", "margin-bottom", "margin-left",
+  "padding", "padding-top", "padding-right", "padding-bottom", "padding-left",
+  "font", "font-family", "font-size", "font-weight", "line-height", "letter-spacing", "text-align",
+  "color", "background", "background-color",
+  "border", "border-width", "border-style", "border-color", "border-radius",
+  "box-shadow", "opacity", "transform", "overflow", "overflow-x", "overflow-y"
+]);
+
+// Generate random short ID for data-xcoding-element-id
+function generateXcodingElementId(): string {
+  const rand = Math.random().toString(36).substring(2, 10);
+  return `xcoding-el-${rand}`;
+}
+
+// Truncate string with suffix if exceeds max bytes
+function truncateWithSuffix(str: string, maxBytes: number): string {
+  if (Buffer.byteLength(str, "utf8") <= maxBytes) return str;
+  const suffix = LIMITS.truncateSuffix;
+  const suffixBytes = Buffer.byteLength(suffix, "utf8");
+  const targetBytes = maxBytes - suffixBytes;
+  let result = str;
+  while (Buffer.byteLength(result, "utf8") > targetBytes && result.length > 0) {
+    result = result.slice(0, -1);
+  }
+  return result + suffix;
+}
+
+// Extract opening tag from outerHTML (up to first >)
+function extractOpeningTag(outerHTML: string): string {
+  const match = outerHTML.match(/^<[^>]*>/s);
+  if (match) return match[0];
+  return outerHTML.split(">")[0] + ">";
+}
+
 type PreviewEntry = {
   id: string;
   view: BrowserView;
@@ -18,6 +101,8 @@ type PreviewEntry = {
       domInspect: boolean;
       binding: boolean;
     };
+    // Track injected xcoding-element-ids for cleanup on Inspect close
+    injectedElementIds: Map<number, string>;
   };
 };
 
@@ -260,6 +345,276 @@ async function fetchNodeData(entry: PreviewEntry, nodeId: number) {
   return { computed, boxModel };
 }
 
+// ========== Phase 1: Build ElementContext ==========
+async function buildElementContext(entry: PreviewEntry, nodeId: number): Promise<ElementContext | null> {
+  const previewId = entry.id;
+  const timestamp = Date.now();
+
+  // 1. Get or generate xcodingElementId
+  let xcodingElementId = entry.inspect.injectedElementIds.get(nodeId);
+  if (!xcodingElementId) {
+    xcodingElementId = generateXcodingElementId();
+    // Inject data-xcoding-element-id attribute to the element
+    const injectResp = await sendCommandSafe(entry, "DOM.setAttributeValue", {
+      nodeId,
+      name: "data-xcoding-element-id",
+      value: xcodingElementId
+    });
+    if (injectResp.ok) {
+      entry.inspect.injectedElementIds.set(nodeId, xcodingElementId);
+      debugLog(previewId, `Injected data-xcoding-element-id="${xcodingElementId}" to nodeId=${nodeId}`);
+    } else {
+      debugLog(previewId, `Failed to inject data-xcoding-element-id to nodeId=${nodeId}`);
+    }
+  }
+
+  // 2. Get outerHTML for opening tag
+  const outerResp = await sendCommandSafe(entry, "DOM.getOuterHTML", { nodeId });
+  let elementOpeningTag = "";
+  if (outerResp.ok) {
+    const outerHTML = String((outerResp.result as any)?.outerHTML ?? "");
+    elementOpeningTag = extractOpeningTag(outerHTML);
+    elementOpeningTag = truncateWithSuffix(elementOpeningTag, LIMITS.elementOpeningTagMaxBytes);
+  }
+
+  // 3. Get attributes
+  const attrsResp = await sendCommandSafe(entry, "DOM.getAttributes", { nodeId });
+  const rawAttrs: string[] = attrsResp.ok ? ((attrsResp.result as any)?.attributes ?? []) : [];
+  const attributes: Array<{ name: string; value: string }> = [];
+  for (let i = 0; i < rawAttrs.length && attributes.length < LIMITS.attributesMaxItems; i += 2) {
+    const name = String(rawAttrs[i] ?? "");
+    const value = String(rawAttrs[i + 1] ?? "");
+    if (name) attributes.push({ name, value });
+  }
+  if (rawAttrs.length / 2 > LIMITS.attributesMaxItems) {
+    attributes.push({ name: LIMITS.truncateSuffix, value: "" });
+  }
+
+  // 4. Build CSS_SELECTOR and DOM_PATH by traversing parent chain
+  let cssSelector = "";
+  let domPath = "";
+  const pathParts: string[] = [];
+
+  // Get node description
+  const descResp = await sendCommandSafe(entry, "DOM.describeNode", { nodeId, depth: 0 });
+  if (descResp.ok) {
+    const node = (descResp.result as any)?.node;
+    if (node) {
+      const buildSelectorPart = (n: any): string => {
+        const tag = String(n?.localName ?? n?.nodeName ?? "").toLowerCase();
+        const id = String(n?.attributes?.find?.((a: string, i: number, arr: string[]) => arr[i - 1] === "id") ?? "");
+        const classAttr = String(n?.attributes?.find?.((a: string, i: number, arr: string[]) => arr[i - 1] === "class") ?? "");
+        
+        // Parse attributes array (alternating name/value)
+        const attrs = n?.attributes ?? [];
+        let nodeId = "";
+        let nodeClass = "";
+        for (let i = 0; i < attrs.length; i += 2) {
+          if (attrs[i] === "id") nodeId = attrs[i + 1] || "";
+          if (attrs[i] === "class") nodeClass = attrs[i + 1] || "";
+        }
+
+        let part = tag;
+        if (nodeId) part += `#${nodeId}`;
+        if (nodeClass) {
+          const classes = nodeClass.split(/\s+/).filter(Boolean).slice(0, 3);
+          part += classes.map((c: string) => `.${c}`).join("");
+        }
+        return part;
+      };
+
+      // Build selector for current node
+      const currentPart = buildSelectorPart(node);
+      pathParts.unshift(currentPart);
+
+      // Traverse parent chain using DOM.requestNode on parent
+      let currentNodeId = nodeId;
+      let depth = 0;
+      const maxDepth = 10;
+
+      while (depth < maxDepth) {
+        const parentResp = await sendCommandSafe(entry, "DOM.describeNode", { nodeId: currentNodeId, depth: 0 });
+        if (!parentResp.ok) break;
+        const parentNodeId = (parentResp.result as any)?.node?.parentId;
+        if (!parentNodeId) break;
+
+        const parentDescResp = await sendCommandSafe(entry, "DOM.describeNode", { nodeId: parentNodeId, depth: 0 });
+        if (!parentDescResp.ok) break;
+        const parentNode = (parentDescResp.result as any)?.node;
+        if (!parentNode || parentNode.nodeName === "#document") break;
+
+        const parentPart = buildSelectorPart(parentNode);
+        if (parentPart && parentPart !== "html" && parentPart !== "body") {
+          pathParts.unshift(parentPart);
+        }
+        currentNodeId = parentNodeId;
+        depth++;
+      }
+
+      cssSelector = currentPart;
+      domPath = pathParts.join(" > ");
+    }
+  }
+
+  // Truncate paths if needed
+  cssSelector = truncateWithSuffix(cssSelector, LIMITS.pathTextMaxBytes);
+  domPath = truncateWithSuffix(domPath, LIMITS.pathTextMaxBytes);
+
+  // 5. Build stable selector
+  const stableSelector = `[data-xcoding-element-id="${xcodingElementId}"]`;
+
+  return {
+    previewId,
+    nodeId,
+    xcodingElementId,
+    elementOpeningTag,
+    cssSelector,
+    domPath,
+    stableSelector,
+    attributes,
+    timestamp
+  };
+}
+
+// ========== Phase 2: Build CSS Rules Context ==========
+async function buildCssRulesContext(entry: PreviewEntry, nodeId: number): Promise<CssRulesContext | null> {
+  const previewId = entry.id;
+  const timestamp = Date.now();
+
+  const inlineStyle: Array<{ name: string; value: string }> = [];
+  const matchedRules: CssRulesContext["matchedRules"] = [];
+  const inheritedRules: CssRulesContext["inheritedRules"] = [];
+  const cssVariables: Array<{ name: string; value: string }> = [];
+
+  // 1. Get inline styles
+  const inlineResp = await sendCommandSafe(entry, "CSS.getInlineStylesForNode", { nodeId });
+  if (inlineResp.ok) {
+    const inlineStyleObj = (inlineResp.result as any)?.inlineStyle;
+    const cssProperties = inlineStyleObj?.cssProperties ?? [];
+    let count = 0;
+    for (const prop of cssProperties) {
+      const name = String(prop?.name ?? "");
+      const value = String(prop?.value ?? "");
+      if (name && CSS_PROPERTY_WHITELIST.has(name) && count < LIMITS.cssMaxDeclarationsPerRule) {
+        inlineStyle.push({ name, value });
+        count++;
+      }
+    }
+  }
+
+  // 2. Get matched rules
+  const matchedResp = await sendCommandSafe(entry, "CSS.getMatchedStylesForNode", { nodeId });
+  if (matchedResp.ok) {
+    const matchedCSSRules = (matchedResp.result as any)?.matchedCSSRules ?? [];
+    let ruleCount = 0;
+
+    for (const ruleMatch of matchedCSSRules) {
+      if (ruleCount >= LIMITS.cssMaxRules) break;
+
+      const rule = ruleMatch?.rule;
+      if (!rule) continue;
+
+      const selectorList = rule?.selectorList?.selectors ?? [];
+      const selector = selectorList.map((s: any) => String(s?.text ?? "")).join(", ") || String(rule?.selectorList?.text ?? "");
+      
+      const styleSheetId = String(rule?.styleSheetId ?? "");
+      let sourceUrl = "";
+
+      // Try to get source URL from styleSheetId
+      if (styleSheetId) {
+        const sheetResp = await sendCommandSafe(entry, "CSS.getStyleSheetText", { styleSheetId });
+        // sourceURL might be in the rule origin
+        sourceUrl = String(rule?.origin === "regular" ? rule?.style?.styleSheetId : "") || "";
+      }
+
+      const cssProperties = rule?.style?.cssProperties ?? [];
+      const declarations: Array<{ name: string; value: string }> = [];
+      let declCount = 0;
+
+      for (const prop of cssProperties) {
+        if (declCount >= LIMITS.cssMaxDeclarationsPerRule) break;
+        const name = String(prop?.name ?? "");
+        const value = String(prop?.value ?? "");
+        if (name && CSS_PROPERTY_WHITELIST.has(name)) {
+          declarations.push({ name, value });
+          declCount++;
+        }
+        // Collect CSS variables
+        if (name.startsWith("--") && cssVariables.length < 20) {
+          cssVariables.push({ name, value });
+        }
+      }
+
+      if (declarations.length > 0 || selector) {
+        matchedRules.push({
+          selector,
+          sourceUrl: sourceUrl || undefined,
+          styleSheetId: styleSheetId || undefined,
+          declarations
+        });
+        ruleCount++;
+      }
+    }
+
+    // 3. Get inherited rules (first layer only for MVP)
+    const inherited = (matchedResp.result as any)?.inherited ?? [];
+    if (inherited.length > 0) {
+      const firstInherited = inherited[0];
+      const inheritedMatchedRules = firstInherited?.matchedCSSRules ?? [];
+
+      for (const ruleMatch of inheritedMatchedRules.slice(0, 5)) {
+        const rule = ruleMatch?.rule;
+        if (!rule) continue;
+
+        const selectorList = rule?.selectorList?.selectors ?? [];
+        const selector = selectorList.map((s: any) => String(s?.text ?? "")).join(", ");
+
+        const cssProperties = rule?.style?.cssProperties ?? [];
+        const declarations: Array<{ name: string; value: string }> = [];
+
+        for (const prop of cssProperties.slice(0, LIMITS.cssMaxDeclarationsPerRule)) {
+          const name = String(prop?.name ?? "");
+          const value = String(prop?.value ?? "");
+          if (name && CSS_PROPERTY_WHITELIST.has(name)) {
+            declarations.push({ name, value });
+          }
+        }
+
+        if (declarations.length > 0) {
+          inheritedRules.push({ selector, declarations });
+        }
+      }
+    }
+  }
+
+  return {
+    previewId,
+    nodeId,
+    inlineStyle,
+    matchedRules,
+    inheritedRules,
+    cssVariables,
+    timestamp
+  };
+}
+
+// Cleanup injected xcoding-element-ids when Inspect closes
+async function cleanupInjectedElementIds(entry: PreviewEntry) {
+  const ids = entry.inspect.injectedElementIds;
+  if (ids.size === 0) return;
+
+  debugLog(entry.id, `Cleaning up ${ids.size} injected element IDs`);
+
+  for (const [nodeId, xcodingId] of ids) {
+    await sendCommandSafe(entry, "DOM.removeAttribute", {
+      nodeId,
+      name: "data-xcoding-element-id"
+    });
+  }
+
+  ids.clear();
+}
+
 async function resolveBackendNodeId(entry: PreviewEntry, backendNodeId: number): Promise<number | null> {
   // `pushNodesByBackendIdsToFrontend` typically requires a frontend document tree to exist.
   // In DevTools, this is established by calling `DOM.getDocument` after enabling DOM.
@@ -288,6 +643,20 @@ async function handleNodeSelected(entry: PreviewEntry, nodeId: number) {
   const { computed, boxModel } = await fetchNodeData(entry, nodeId);
   debugLog(entry.id, `computedKeys=${Object.keys(computed).length} boxModel=${boxModel ? "yes" : "no"}`);
   broadcast("preview:element:selected", { previewId: entry.id, nodeId, computed, boxModel, timestamp: Date.now() });
+
+  // Phase 1: Build and broadcast ElementContext
+  const elementContext = await buildElementContext(entry, nodeId);
+  if (elementContext) {
+    debugLog(entry.id, `ElementContext built: cssSelector=${elementContext.cssSelector}, xcodingId=${elementContext.xcodingElementId}`);
+    broadcast("preview:element:context", elementContext);
+  }
+
+  // Phase 2: Build and broadcast CssRulesContext
+  const cssRulesContext = await buildCssRulesContext(entry, nodeId);
+  if (cssRulesContext) {
+    debugLog(entry.id, `CssRulesContext built: inlineStyle=${cssRulesContext.inlineStyle.length}, matchedRules=${cssRulesContext.matchedRules.length}`);
+    broadcast("preview:element:css", cssRulesContext);
+  }
 }
 
 async function resolveNodeIdAtPoint(entry: PreviewEntry, x: number, y: number): Promise<number | null> {
@@ -522,6 +891,9 @@ async function exitInspect(entry: PreviewEntry, opts?: { force?: boolean }) {
   debugLog(entry.id, "exitInspect");
   removeInspectInputCapture(entry);
 
+  // Cleanup injected xcoding-element-ids (per requirement: remove on Inspect close)
+  await cleanupInjectedElementIds(entry);
+
   // Best-effort cleanup in all modes. Some targets can fail individual CDP calls depending on timing
   // (navigation, crashed renderer, context destroyed). We try multiple ways to ensure we never
   // leave the preview in a state where clicks are still intercepted.
@@ -714,7 +1086,8 @@ export function createPreview(previewId: string, url: string) {
       enabled: false,
       selectedNodeId: null,
       mode: "none",
-      capabilities: { dom: false, css: false, overlay: false, overlayInspect: false, domInspect: false, binding: false }
+      capabilities: { dom: false, css: false, overlay: false, overlayInspect: false, domInspect: false, binding: false },
+      injectedElementIds: new Map()
     }
   });
   attachPreviewDebugger(previewId, view);

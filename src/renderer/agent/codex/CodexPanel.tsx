@@ -102,6 +102,47 @@ export default function CodexPanel({ slot, projectRootPath, onOpenUrl, onOpenIma
   // If we only key by path, switching slots may incorrectly reuse the previous slot's Codex UI state.
   const projectKey = `${String(slot)}:${projectRootPath ? String(projectRootPath) : ""}`;
 
+  useEffect(() => {
+    const inferAttachmentName = (text: string) => {
+      const trimmed = String(text ?? "").trim();
+      if (!trimmed) return "Context";
+      if (trimmed.startsWith("CSS RULES:")) return "CSS";
+      if (trimmed.startsWith("ELEMENT:")) {
+        const m = trimmed.match(/^ELEMENT:\s*<\s*([a-zA-Z0-9-]+)/m);
+        if (m?.[1]) return `<${m[1]}>`;
+        return "Element";
+      }
+      return "Context";
+    };
+
+    const onInject = (evt: Event) => {
+      const e = evt as CustomEvent<any>;
+      const detail = e?.detail ?? {};
+      const targetSlot = Number(detail.slot ?? NaN);
+      if (!Number.isFinite(targetSlot) || targetSlot !== slot) return;
+      const text = String(detail.text ?? "").trim();
+      if (!text) return;
+
+      const name = String(detail.name ?? inferAttachmentName(text));
+      setAttachments((prev) => {
+        const last = prev[prev.length - 1];
+        if (last && last.kind === "file" && String((last as any).text ?? "") === text) return prev;
+        const attachment: ComposerAttachment = {
+          id: `design-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+          kind: "file",
+          name,
+          text
+        };
+        const next = [...prev, attachment];
+        const LIMIT = 12;
+        return next.length > LIMIT ? next.slice(next.length - LIMIT) : next;
+      });
+    };
+
+    window.addEventListener("xcoding:codex:inject", onInject as any);
+    return () => window.removeEventListener("xcoding:codex:inject", onInject as any);
+  }, [slot]);
+
   const bump = useCallback(() => {
     if (scheduledRafRef.current != null) return;
     scheduledRafRef.current = window.requestAnimationFrame(() => {
