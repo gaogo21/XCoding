@@ -22,11 +22,14 @@ export type CssRulesContext = {
     selector: string;
     sourceUrl?: string;
     styleSheetId?: string;
+    range?: { startLine: number; startColumn: number; endLine?: number; endColumn?: number };
     declarations: Array<{ name: string; value: string }>;
   }>;
   inheritedRules: Array<{
     selector: string;
     sourceUrl?: string;
+    styleSheetId?: string;
+    range?: { startLine: number; startColumn: number; endLine?: number; endColumn?: number };
     declarations: Array<{ name: string; value: string }>;
   }>;
   cssVariables: Array<{ name: string; value: string }>;
@@ -101,6 +104,7 @@ type PreviewEntry = {
       domInspect: boolean;
       binding: boolean;
     };
+    styleSheetHeaders: Map<string, { styleSheetId: string; sourceURL?: string }>;
     // Track injected xcoding-element-ids for cleanup on Inspect close
     injectedElementIds: Map<number, string>;
   };
@@ -518,14 +522,21 @@ async function buildCssRulesContext(entry: PreviewEntry, nodeId: number): Promis
       const selector = selectorList.map((s: any) => String(s?.text ?? "")).join(", ") || String(rule?.selectorList?.text ?? "");
       
       const styleSheetId = String(rule?.styleSheetId ?? "");
-      let sourceUrl = "";
-
-      // Try to get source URL from styleSheetId
-      if (styleSheetId) {
-        const sheetResp = await sendCommandSafe(entry, "CSS.getStyleSheetText", { styleSheetId });
-        // sourceURL might be in the rule origin
-        sourceUrl = String(rule?.origin === "regular" ? rule?.style?.styleSheetId : "") || "";
-      }
+      const sourceUrl = styleSheetId ? String(entry.inspect.styleSheetHeaders.get(styleSheetId)?.sourceURL ?? "") : "";
+      const rangeRaw =
+        selectorList?.[0]?.range ??
+        rule?.selectorList?.range ??
+        rule?.style?.range ??
+        rule?.range ??
+        null;
+      const range = rangeRaw
+        ? {
+            startLine: Number(rangeRaw.startLine ?? 0),
+            startColumn: Number(rangeRaw.startColumn ?? 0),
+            endLine: typeof rangeRaw.endLine === "number" ? Number(rangeRaw.endLine) : undefined,
+            endColumn: typeof rangeRaw.endColumn === "number" ? Number(rangeRaw.endColumn) : undefined
+          }
+        : undefined;
 
       const cssProperties = rule?.style?.cssProperties ?? [];
       const declarations: Array<{ name: string; value: string }> = [];
@@ -550,6 +561,7 @@ async function buildCssRulesContext(entry: PreviewEntry, nodeId: number): Promis
           selector,
           sourceUrl: sourceUrl || undefined,
           styleSheetId: styleSheetId || undefined,
+          range,
           declarations
         });
         ruleCount++;
@@ -568,6 +580,22 @@ async function buildCssRulesContext(entry: PreviewEntry, nodeId: number): Promis
 
         const selectorList = rule?.selectorList?.selectors ?? [];
         const selector = selectorList.map((s: any) => String(s?.text ?? "")).join(", ");
+        const styleSheetId = String(rule?.styleSheetId ?? "");
+        const sourceUrl = styleSheetId ? String(entry.inspect.styleSheetHeaders.get(styleSheetId)?.sourceURL ?? "") : "";
+        const rangeRaw =
+          selectorList?.[0]?.range ??
+          rule?.selectorList?.range ??
+          rule?.style?.range ??
+          rule?.range ??
+          null;
+        const range = rangeRaw
+          ? {
+              startLine: Number(rangeRaw.startLine ?? 0),
+              startColumn: Number(rangeRaw.startColumn ?? 0),
+              endLine: typeof rangeRaw.endLine === "number" ? Number(rangeRaw.endLine) : undefined,
+              endColumn: typeof rangeRaw.endColumn === "number" ? Number(rangeRaw.endColumn) : undefined
+            }
+          : undefined;
 
         const cssProperties = rule?.style?.cssProperties ?? [];
         const declarations: Array<{ name: string; value: string }> = [];
@@ -581,7 +609,13 @@ async function buildCssRulesContext(entry: PreviewEntry, nodeId: number): Promis
         }
 
         if (declarations.length > 0) {
-          inheritedRules.push({ selector, declarations });
+          inheritedRules.push({
+            selector,
+            sourceUrl: sourceUrl || undefined,
+            styleSheetId: styleSheetId || undefined,
+            range,
+            declarations
+          });
         }
       }
     }
@@ -938,6 +972,25 @@ function attachPreviewDebugger(previewId: string, view: BrowserView) {
   debugLog(previewId, "debugger attached");
 
   debuggerApi.on("message", (_event, method, params) => {
+    if (method === "CSS.styleSheetAdded") {
+      const entry = previews.get(previewId);
+      if (!entry) return;
+      const header = (params as any)?.header;
+      const styleSheetId = String(header?.styleSheetId ?? "");
+      if (styleSheetId) {
+        entry.inspect.styleSheetHeaders.set(styleSheetId, { styleSheetId, sourceURL: String(header?.sourceURL ?? "") });
+      }
+      return;
+    }
+
+    if (method === "CSS.styleSheetRemoved") {
+      const entry = previews.get(previewId);
+      if (!entry) return;
+      const styleSheetId = String((params as any)?.styleSheetId ?? "");
+      if (styleSheetId) entry.inspect.styleSheetHeaders.delete(styleSheetId);
+      return;
+    }
+
     if (method === "Runtime.consoleAPICalled") {
       const level = String(params.type ?? "log");
       const args = Array.isArray(params.args) ? params.args : [];
@@ -1041,6 +1094,10 @@ function attachPreviewDebugger(previewId: string, view: BrowserView) {
       entry.inspect.capabilities.overlay = overlay.ok;
       const binding = await sendCommandSafe(entry, "Runtime.addBinding", { name: INSPECT_BINDING_NAME });
       entry.inspect.capabilities.binding = binding.ok;
+      if (css.ok) {
+        // Populate CSS.styleSheetAdded events for existing stylesheets.
+        await sendCommandSafe(entry, "CSS.getAllStyleSheets");
+      }
     })();
   }
 
@@ -1087,6 +1144,7 @@ export function createPreview(previewId: string, url: string) {
       selectedNodeId: null,
       mode: "none",
       capabilities: { dom: false, css: false, overlay: false, overlayInspect: false, domInspect: false, binding: false },
+      styleSheetHeaders: new Map(),
       injectedElementIds: new Map()
     }
   });

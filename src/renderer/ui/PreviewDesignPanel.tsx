@@ -1,4 +1,4 @@
-import { Copy } from "lucide-react";
+import { Copy, RotateCcw } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "./i18n";
 
@@ -147,24 +147,37 @@ function FieldRow({
   editable,
   inputValue,
   onChange,
-  onBlur
+  onCommit,
+  isOverridden
 }: {
   label: string;
   value: string;
   editable: boolean;
   inputValue: string;
   onChange: (next: string) => void;
-  onBlur: () => void;
+  onCommit: () => void;
+  isOverridden?: boolean;
 }) {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      (e.target as HTMLInputElement).blur();
+      onCommit();
+    }
+  };
+
   return (
     <div className="grid grid-cols-[1fr_1fr] items-center gap-2">
-      <div className="truncate text-[11px] text-[var(--vscode-descriptionForeground)]">{label}</div>
+      <div className={`truncate text-[11px] ${isOverridden ? "text-[var(--vscode-charts-blue)] font-medium" : "text-[var(--vscode-descriptionForeground)]"}`}>
+        {label}{isOverridden ? " *" : ""}
+      </div>
       {editable ? (
         <input
-          className="min-w-0 rounded bg-[var(--vscode-input-background)] px-2 py-1 text-[11px] text-[var(--vscode-input-foreground)] outline-none ring-1 ring-[var(--vscode-input-border)] focus:ring-[var(--vscode-focusBorder)]"
+          className={`min-w-0 rounded bg-[var(--vscode-input-background)] px-2 py-1 text-[11px] text-[var(--vscode-input-foreground)] outline-none ring-1 ${isOverridden ? "ring-[var(--vscode-charts-blue)]" : "ring-[var(--vscode-input-border)]"} focus:ring-[var(--vscode-focusBorder)]`}
           value={inputValue}
           onChange={(e) => onChange(e.target.value)}
-          onBlur={onBlur}
+          onBlur={onCommit}
+          onKeyDown={handleKeyDown}
           spellCheck={false}
         />
       ) : (
@@ -199,16 +212,95 @@ export default function PreviewDesignPanel({ previewId, isActive, onInjectAI, is
   const draftRef = useRef<Record<string, string>>({});
   const [, forceDraftTick] = useState(0);
 
+  // M2: Track applied overrides (property -> value) for reset functionality
+  const appliedOverridesRef = useRef<Record<string, string>>({});
+  const [, forceOverridesTick] = useState(0);
+
+  // M3: Track last apply status for showing hints
+  const [applyStatus, setApplyStatus] = useState<{
+    property: string;
+    ok: boolean;
+    message: string;
+  } | null>(null);
+
+  // Original computed values snapshot for comparison
+  const originalComputedRef = useRef<Record<string, string>>({});
+
   function setDraft(key: string, value: string) {
     draftRef.current = { ...draftRef.current, [key]: value };
     forceDraftTick((v) => v + 1);
   }
 
-  function resetDraftFromComputed(nextComputed: Record<string, string>) {
+  function resetDraftFromComputed(nextComputed: Record<string, string>, isNewSelection = false) {
     const next: Record<string, string> = {};
-    for (const key of EDITABLE_FIELDS) next[key] = nextComputed[key] ?? "";
+    for (const key of EDITABLE_FIELDS) {
+      // If we have an applied override, use that; otherwise use computed
+      const override = appliedOverridesRef.current[key];
+      next[key] = override !== undefined ? override : (nextComputed[key] ?? "");
+    }
     draftRef.current = next;
     forceDraftTick((v) => v + 1);
+
+    // Save original computed snapshot on new selection
+    if (isNewSelection) {
+      const orig: Record<string, string> = {};
+      for (const key of EDITABLE_FIELDS) orig[key] = nextComputed[key] ?? "";
+      originalComputedRef.current = orig;
+    }
+  }
+
+  // M2: Reset all overrides for current element
+  async function resetAllOverrides() {
+    if (!selectedNodeId) return;
+    const overrides = { ...appliedOverridesRef.current };
+    for (const property of Object.keys(overrides)) {
+      // Write empty value to remove inline style
+      await window.xcoding.preview.styleSet({ previewId, nodeId: selectedNodeId, property, value: "" });
+    }
+    appliedOverridesRef.current = {};
+    forceOverridesTick((v) => v + 1);
+    setApplyStatus(null);
+  }
+
+  // M3: Generate failure hint based on computed styles
+  function generateFailureHint(property: string, computedStyles: Record<string, string>): string {
+    const reasons: string[] = [];
+    const display = computedStyles["display"] ?? "";
+
+    if (property === "width" || property === "height") {
+      // Check if inline element
+      if (display === "inline") {
+        reasons.push("该元素是行内元素（display:inline），width/height 可能不生效");
+      }
+      // Check flex/grid constraints
+      if (display === "flex" || display === "inline-flex" || display === "grid" || display === "inline-grid") {
+        reasons.push("该元素是 flex/grid 容器，子元素可能受布局约束");
+      }
+      // Check min/max constraints
+      const minW = computedStyles["min-width"];
+      const maxW = computedStyles["max-width"];
+      const minH = computedStyles["min-height"];
+      const maxH = computedStyles["max-height"];
+      if (property === "width" && (minW && minW !== "0px" && minW !== "auto")) {
+        reasons.push(`min-width (${minW}) 可能限制了宽度`);
+      }
+      if (property === "width" && (maxW && maxW !== "none")) {
+        reasons.push(`max-width (${maxW}) 可能限制了宽度`);
+      }
+      if (property === "height" && (minH && minH !== "0px" && minH !== "auto")) {
+        reasons.push(`min-height (${minH}) 可能限制了高度`);
+      }
+      if (property === "height" && (maxH && maxH !== "none")) {
+        reasons.push(`max-height (${maxH}) 可能限制了高度`);
+      }
+    }
+
+    // Generic fallback
+    if (reasons.length === 0) {
+      reasons.push("可能受父容器布局约束或其他 CSS 规则影响");
+    }
+
+    return reasons.slice(0, 3).join("；");
   }
 
   useEffect(() => {
@@ -227,16 +319,23 @@ export default function PreviewDesignPanel({ previewId, isActive, onInjectAI, is
 
     const offSelected = window.xcoding.preview.onElementSelected((e: ElementSelectedPayload) => {
       if (String(e.previewId ?? "") !== previewId) return;
-      setSelectedNodeId(Number(e.nodeId ?? 0) || null);
+      const newNodeId = Number(e.nodeId ?? 0) || null;
+      // When selecting a new element, clear overrides for the new element
+      if (newNodeId !== selectedNodeId) {
+        appliedOverridesRef.current = {};
+        forceOverridesTick((v) => v + 1);
+        setApplyStatus(null);
+      }
+      setSelectedNodeId(newNodeId);
       setComputed(e.computed ?? {});
       setBoxModel(e.boxModel ?? null);
-      resetDraftFromComputed(e.computed ?? {});
+      resetDraftFromComputed(e.computed ?? {}, true);
     });
 
     const offUpdated = window.xcoding.preview.onElementUpdated((e: ElementUpdatedPayload) => {
       if (String(e.previewId ?? "") !== previewId) return;
       setComputed(e.computed ?? {});
-      resetDraftFromComputed(e.computed ?? {});
+      resetDraftFromComputed(e.computed ?? {}, false);
     });
 
     // Phase 1: Element Context
@@ -354,7 +453,85 @@ export default function PreviewDesignPanel({ previewId, isActive, onInjectAI, is
     if (!selectedNodeId) return;
     const raw = draftRef.current[property] ?? "";
     const value = normalizeValue(raw);
-    await window.xcoding.preview.styleSet({ previewId, nodeId: selectedNodeId, property, value });
+    const originalValue = originalComputedRef.current[property] ?? "";
+
+    // Skip if value hasn't changed from original and no override exists
+    if (value === originalValue && !appliedOverridesRef.current[property]) {
+      return;
+    }
+
+    // Get boxModel before applying
+    const beforeBoxModel = boxModel ? { width: boxModel.width, height: boxModel.height } : null;
+
+    const result = await window.xcoding.preview.styleSet({ previewId, nodeId: selectedNodeId, property, value });
+
+    if (!result.ok) {
+      setApplyStatus({
+        property,
+        ok: false,
+        message: "写入失败：" + (result.reason || "未知错误")
+      });
+      return;
+    }
+
+    // M2: Track this override
+    if (value) {
+      appliedOverridesRef.current = { ...appliedOverridesRef.current, [property]: value };
+    } else {
+      // If value is empty, remove from overrides
+      const next = { ...appliedOverridesRef.current };
+      delete next[property];
+      appliedOverridesRef.current = next;
+    }
+    forceOverridesTick((v) => v + 1);
+
+    // M3: Check if change actually took effect (for width/height)
+    if (property === "width" || property === "height") {
+      // Wait a bit for the updated event to arrive with new boxModel
+      setTimeout(() => {
+        const afterBoxModel = boxModel;
+        const afterComputed = computed;
+
+        // Compare boxModel dimensions if available
+        if (beforeBoxModel && afterBoxModel) {
+          const dimension = property === "width" ? "width" : "height";
+          const before = beforeBoxModel[dimension];
+          const after = afterBoxModel[dimension];
+
+          // If dimension didn't change significantly, show hint
+          if (Math.abs(before - after) < 1) {
+            const hint = generateFailureHint(property, afterComputed);
+            setApplyStatus({
+              property,
+              ok: false,
+              message: `未生效：${hint}`
+            });
+            return;
+          }
+        }
+
+        setApplyStatus({
+          property,
+          ok: true,
+          message: "已生效"
+        });
+
+        // Clear success message after 2 seconds
+        setTimeout(() => {
+          setApplyStatus((prev) => (prev?.property === property && prev?.ok ? null : prev));
+        }, 2000);
+      }, 100);
+    } else {
+      // For non-size properties, just show success
+      setApplyStatus({
+        property,
+        ok: true,
+        message: "已生效"
+      });
+      setTimeout(() => {
+        setApplyStatus((prev) => (prev?.property === property && prev?.ok ? null : prev));
+      }, 2000);
+    }
   }
 
   const emptyText = !inspectEnabled ? t("designEmptyStateInspectOff") : t("designEmptyStateNoSelection");
@@ -592,6 +769,36 @@ export default function PreviewDesignPanel({ previewId, isActive, onInjectAI, is
           </div>
         </div>
 
+        {/* M3: Status hint */}
+        {applyStatus && (
+          <div
+            className={`rounded p-2 text-[11px] ${
+              applyStatus.ok
+                ? "bg-[var(--vscode-inputValidation-infoBackground)] text-[var(--vscode-inputValidation-infoForeground)]"
+                : "bg-[var(--vscode-inputValidation-warningBackground)] text-[var(--vscode-inputValidation-warningForeground)]"
+            }`}
+          >
+            <span className="font-medium">{applyStatus.property}:</span> {applyStatus.message}
+          </div>
+        )}
+
+        {/* M2: Reset button */}
+        {Object.keys(appliedOverridesRef.current).length > 0 && (
+          <div className="flex items-center justify-between rounded bg-[var(--vscode-editor-background)] p-2">
+            <span className="text-[11px] text-[var(--vscode-descriptionForeground)]">
+              已修改 {Object.keys(appliedOverridesRef.current).length} 个属性
+            </span>
+            <button
+              className="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-[var(--vscode-button-foreground)] bg-[var(--vscode-button-secondaryBackground)] hover:bg-[var(--vscode-button-secondaryHoverBackground)]"
+              onClick={() => void resetAllOverrides()}
+              type="button"
+            >
+              <RotateCcw className="h-3 w-3" />
+              重置
+            </button>
+          </div>
+        )}
+
         {sections.map((s) => (
           <div className="space-y-2" key={s.title}>
             <SectionTitle title={s.title} />
@@ -604,7 +811,8 @@ export default function PreviewDesignPanel({ previewId, isActive, onInjectAI, is
                   editable={EDITABLE_FIELDS.has(field)}
                   inputValue={draftRef.current[field] ?? ""}
                   onChange={(next) => setDraft(field, next)}
-                  onBlur={() => void commitField(field)}
+                  onCommit={() => void commitField(field)}
+                  isOverridden={!!appliedOverridesRef.current[field]}
                 />
               ))}
             </div>
